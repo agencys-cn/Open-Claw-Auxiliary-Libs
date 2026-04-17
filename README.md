@@ -45,6 +45,22 @@ TASK_TIMEOUT=0
 ULID_ENABLED=true
 ```
 
+## 交流群
+
+欢迎进群沟通
+
+![交流群](./core/group.png)
+
+## 赞助
+
+如果你觉得有用，给作者续一杯 ☕
+
+![赞助](./core/sponsor.png)
+
 ## 许可证
 
 MIT License
+
+---
+
+*最后更新：2026-04-17*

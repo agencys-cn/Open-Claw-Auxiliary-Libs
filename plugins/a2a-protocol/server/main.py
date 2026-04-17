@@ -19,14 +19,15 @@ import uvicorn
 # 添加父目录到路径
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from agent_card import AgentCard, Capabilities, Skill, registry
+from agent_card import AgentCard, Capabilities, Skill, registry, init_registry
 from jsonrpc import JSONRPCRequest, JSONRPCResponse, JSONRPCError, methods
 from task_manager import Task, TaskState, TaskStatus, task_store, Artifact, Message
 from session import Session, session_store
-from session_store import session_store as gateway_session_store  # ULID 会话队列
+from session_store import session_store as gateway_session_store, init_session_store, get_session_store  # ULID 会话队列
 from sse import SSEClient, SSEStream, broadcaster
 from websocket import ws_server, WSClient
 from gateway import gateway_bridge, gateway_config, gateway_health
+from db import init_database, get_database, A2ADatabase
 
 # 配置日志
 logging.basicConfig(
@@ -47,9 +48,28 @@ HOST = "0.0.0.0"
 async def lifespan(app: FastAPI):
     """应用生命周期"""
     logger.info(f"A2A Server 启动 @ {HOST}:{PORT}")
+    
+    # 初始化数据库
+    db = init_database()
+    logger.info(f"数据库初始化: {db.db_path}")
+    
+    # 初始化会话存储（使用数据库）
+    session_store_instance = await init_session_store()
+    logger.info("会话存储已初始化")
+    
+    # 初始化 Agent Card 注册表（使用数据库缓存）
+    init_registry(db)
+    logger.info("Agent Card 注册表已初始化")
+    
+    # 注册 JSON-RPC 方法
     register_jsonrpc_methods()
     register_default_agent()
+    
     yield
+    
+    # 关闭时保存会话
+    await session_store_instance.shutdown()
+    logger.info("会话存储已关闭")
     logger.info("A2A Server 关闭")
 
 
@@ -297,6 +317,23 @@ async def gateway_health_check():
     """Gateway 健康检查"""
     is_alive = await gateway_health.health_check()
     return {"is_alive": is_alive}
+
+
+# ─────────────────────────────────────────────
+# 路由：数据库和统计
+# ─────────────────────────────────────────────
+@app.get("/db/stats")
+async def get_db_stats():
+    """获取数据库统计"""
+    db = get_database()
+    store = get_session_store()
+    return {
+        "database": db.get_stats(),
+        "memory_sessions": len(store._sessions) if hasattr(store, '_sessions') else 0,
+        "active_tasks": len(task_store.list_active()),
+        "total_tasks": len(task_store),
+        "registered_agents": len(registry.list_all()),
+    }
 
 
 # ─────────────────────────────────────────────

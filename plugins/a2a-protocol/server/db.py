@@ -53,6 +53,7 @@ class SessionRecord:
     updated_at: float
     last_accessed: float
     expires_at: float  # 过期时间
+    last_cleaned: float = 0  # 上次清理时间
 
 
 @dataclass

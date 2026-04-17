@@ -4,7 +4,8 @@
 """
 import asyncio
 import logging
-from datetime import datetime
+import os
+from datetime import datetime, timedelta
 from enum import Enum
 from typing import Dict, List, Optional, Any
 
@@ -170,6 +171,11 @@ class SessionStore:
         self._lock = asyncio.Lock()
         self._save_task: Optional[asyncio.Task] = None
         self._cleanup_task: Optional[asyncio.Task] = None
+        
+        # 清理配置
+        self._cleanup_enabled = os.getenv("SESSION_CLEANUP_ENABLED", "true").lower() == "true"
+        self._cleanup_interval = int(os.getenv("SESSION_CLEANUP_INTERVAL", "86400"))  # 24小时
+        self._max_idle_days = int(os.getenv("SESSION_MAX_IDLE_DAYS", "15"))
     
     @property
     def db(self) -> A2ADatabase:
@@ -185,8 +191,12 @@ class SessionStore:
         # 启动定期保存
         self._save_task = asyncio.create_task(self._save_loop())
         
-        # 启动定期清理
-        self._cleanup_task = asyncio.create_task(self._cleanup_loop())
+        # 启动定期清理（仅当启用时）
+        if self._cleanup_enabled:
+            self._cleanup_task = asyncio.create_task(self._cleanup_loop())
+            logger.info(f"会话清理已启用: 间隔={self._cleanup_interval}s, 最大空闲={self._max_idle_days}天")
+        else:
+            logger.info("会话清理已禁用")
         
         logger.info(f"会话存储初始化完成，加载 {len(self._sessions)} 个会话")
     
@@ -240,11 +250,11 @@ class SessionStore:
                 logger.error(f"保存循环异常: {e}")
     
     async def _cleanup_loop(self):
-        """定期清理循环（每 1 小时）"""
+        """定期清理循环"""
         while True:
             try:
-                await asyncio.sleep(3600)
-                self.db.cleanup_expired()
+                await asyncio.sleep(self._cleanup_interval)
+                await self._cleanup_idle_sessions()
             except asyncio.CancelledError:
                 break
             except Exception as e:
@@ -486,6 +496,67 @@ class SessionStore:
             del self._ulid_index[ulid]
             
             return True
+    
+    async def _cleanup_idle_sessions(self) -> int:
+        """
+        清理空闲会话
+        
+        删除超过指定天数未访问的会话。
+        会同时通知 Gateway 清理会话。
+        
+        Returns:
+            清理的会话数量
+        """
+        idle_seconds = self._max_idle_days * 86400  # 转换为秒
+        cutoff = datetime.now() - timedelta(seconds=idle_seconds)
+        
+        async with self._lock:
+            # 找出需要删除的会话
+            to_delete = []
+            for session in self._sessions.values():
+                if session.last_active < cutoff:
+                    to_delete.append(session.ulid)
+            
+            deleted_count = 0
+            for ulid in to_delete:
+                # 通知 Gateway 清理会话
+                await self._notify_gateway_cleanup(ulid)
+                
+                # 从数据库删除
+                self.db.delete_session(f"session_{ulid}")
+                
+                # 从内存删除
+                session_key = self._ulid_index.get(ulid)
+                if session_key and session_key in self._sessions:
+                    del self._sessions[session_key]
+                if ulid in self._ulid_index:
+                    del self._ulid_index[ulid]
+                
+                deleted_count += 1
+                logger.info(f"已清理空闲会话: {ulid}")
+            
+            if deleted_count > 0:
+                logger.info(f"共清理了 {deleted_count} 个空闲会话（>{self._max_idle_days}天无访问）")
+            
+            return deleted_count
+    
+    async def _notify_gateway_cleanup(self, ulid: str):
+        """
+        通知 Gateway 清理会话
+        
+        Args:
+            ulid: 会话 ULID
+        """
+        try:
+            # 导入 gateway 避免循环依赖
+            from .gateway import gateway_bridge
+            session_key = f"session_{ulid}"
+            gateway_bridge.clear_session(session_key)
+            logger.debug(f"已通知 Gateway 清理会话: {session_key}")
+        except ImportError:
+            logger.warning("无法导入 gateway 模块，跳过 Gateway 会话清理")
+        except Exception as e:
+            logger.error(f"通知 Gateway 清理会话失败: {e}")
     
     async def shutdown(self):
         """关闭（保存所有变更）"""

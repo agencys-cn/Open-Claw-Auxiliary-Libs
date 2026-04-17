@@ -49,13 +49,13 @@ ULID_ENABLED=true
 
 欢迎进群沟通
 
-![交流群](./core/group.png)
+![交流群](./imgs/group.png)
 
 ## 赞助
 
 如果你觉得有用，给作者续一杯 1M的Token
 
-![赞助](./core/sponsor.png)
+![赞助](./imgs/sponsor.png)
 
 ## 许可证
 

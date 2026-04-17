@@ -11,7 +11,7 @@ from typing import Dict, List, Optional, Any
 
 import ulid
 
-from .db import get_database, A2ADatabase
+from db import get_database, A2ADatabase
 
 logger = logging.getLogger("a2a")
 
@@ -594,3 +594,7 @@ async def init_session_store() -> SessionStore:
     store = get_session_store()
     await store.initialize()
     return store
+
+
+# 单例实例（供 main.py 导入使用）
+session_store = get_session_store()

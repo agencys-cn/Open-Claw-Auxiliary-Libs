@@ -51,20 +51,20 @@ class UnifiedHealth:
     """统一健康检查对象"""
     def __init__(self, bridge):
         self._bridge = bridge
-        self._is_alive = False
-        self._clients = 0
+        self.__is_alive = False
+        self.__clients = 0
     
     @property
     def is_alive(self) -> bool:
-        return self._is_alive
+        return self.__is_alive
     
     @property
     def _clients(self) -> int:
-        return self._clients
+        return self.__clients
     
     async def health_check(self) -> bool:
-        self._is_alive = await self._bridge.health_check_impl()
-        return self._is_alive
+        self.__is_alive = await self._bridge.health_check_impl()
+        return self.__is_alive
 
 
 class UnifiedBridge:

@@ -16,6 +16,13 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request, Query, HTT
 from fastapi.responses import JSONResponse, StreamingResponse
 import uvicorn
 
+# 配置日志（必须在使用 logger 之前）
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s"
+)
+logger = logging.getLogger("a2a")
+
 # 添加父目录到路径
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -37,13 +44,6 @@ if GATEWAY_TYPE.value == "hermes":
 else:
     from gateway_pool import get_gateway_pool, start_gateway_pool, GatewayPool
     logger.info(f"使用 OpenClaw Gateway 后端")
-
-# 配置日志
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s"
-)
-logger = logging.getLogger("a2a")
 
 # 全局变量
 PORT = 13666
@@ -811,7 +811,7 @@ def main():
     logger.info(f"端口: {PORT}")
     logger.info(f"Agent: writer")
     logger.info(f"Endpoint: http://0.0.0.0:{PORT}")
-    logger.info(f"Gateway: {gateway_config.url}")
+    logger.info(f"Gateway: {get_gateway_bridge().config.url}")
     logger.info("=" * 50)
     
     uvicorn.run(app, host=HOST, port=PORT, log_level="info")

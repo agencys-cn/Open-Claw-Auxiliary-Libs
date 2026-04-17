@@ -24,11 +24,13 @@ venv/
 .env.local
 .env.*.local
 
-# 图片文件（如果不需要上传）
+# 图片文件（core 目录下的二维码除外）
 *.png
 *.jpg
 *.jpeg
 *.gif
+!core/group.png
+!core/sponsor.png
 
 # 测试
 .pytest_cache/

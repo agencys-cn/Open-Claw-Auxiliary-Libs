@@ -24,7 +24,7 @@ A2A 协议核心组件
     >>> task.add_artifact(Artifact(type="text", content="小说内容..."))
 """
 
-import json
+import asyncio
 import logging
 from dataclasses import dataclass, field, asdict
 from typing import Any, Optional, List, Dict
@@ -176,7 +176,7 @@ class Task:
         completed_at: 完成时间
         error: 错误信息（如果失败）
         metadata: 额外元数据
-        timeout_seconds: 任务超时时间（秒），默认 0 表示不超时
+        timeout_seconds: 任务超时时间（秒），默认 300 秒
         cancel_event: 取消事件（asyncio.Event）
     
     Example:
@@ -197,10 +197,10 @@ class Task:
     completed_at: str = ""
     error: str = ""
     metadata: Dict[str, Any] = field(default_factory=dict)
-    timeout_seconds: int = 0  # 默认 0 表示不超时，只要 Gateway 在执行就一直等
+    timeout_seconds: int = 300  # 默认 300 秒超时
     
     # 运行时状态（不序列化）
-    _cancel_event: Any = field(default=None, repr=False)
+    _cancel_event: asyncio.Event = field(default=None, init=False, repr=False)
     
     def __post_init__(self):
         """初始化后处理，自动生成 ID 和时间"""
@@ -217,19 +217,22 @@ class Task:
             self._cancel_event = asyncio.Event()
     
     @property
-    def cancel_event(self) -> Any:
+    def cancel_event(self) -> asyncio.Event:
         """获取取消事件"""
         return self._cancel_event
     
-    def cancel(self) -> None:
+    def cancel(self, reason: str = "用户取消") -> None:
         """
         取消任务
         
         设置取消事件，通知执行中的任务立即停止。
+        
+        Args:
+            reason: 取消原因
         """
         if self._cancel_event:
             self._cancel_event.set()
-            logger.info(f"Task {self.id} 取消事件已触发")
+            logger.info(f"Task {self.id} 取消事件已触发: {reason}")
     
     @property
     def is_canceled(self) -> bool:
@@ -245,16 +248,11 @@ class Task:
         elapsed = (datetime.now() - created).total_seconds()
         return elapsed > self.timeout_seconds
     
-    def __post_init__(self):
-        """初始化后处理，自动生成 ID 和时间"""
-        if not self.id:
-            self.id = f"task_{uuid.uuid4().hex[:12]}"
-        if not self.created_at:
-            self.created_at = datetime.now().isoformat()
-        if not self.updated_at:
-            self.updated_at = self.created_at
-        if isinstance(self.status, dict):
-            self.status = TaskStatus.from_dict(self.status)
+    @property
+    def elapsed_seconds(self) -> float:
+        """已运行时间（秒）"""
+        created = datetime.fromisoformat(self.created_at)
+        return (datetime.now() - created).total_seconds()
     
     def to_dict(self) -> Dict[str, Any]:
         """
@@ -265,6 +263,8 @@ class Task:
         """
         data = asdict(self)
         data["status"] = self.status.to_dict()
+        # 移除运行时状态
+        data.pop("_cancel_event", None)
         return data
     
     @classmethod

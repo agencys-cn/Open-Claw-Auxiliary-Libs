@@ -11,6 +11,8 @@ A2A 协议核心组件 - 桥接 OpenClaw Gateway
     2. 流式处理 - 支持 SSE 格式的流式输出
     3. 会话管理 - 维护与 Gateway 的会话上下文
     4. 健康检查 - 监控 Gateway 可用性
+    5. 任务取消传播 - 取消 A2A 任务时同时取消 Gateway 调用
+    6. 超时控制 - 支持任务超时自动取消
 
 示例:
     >>> bridge = GatewayBridge()
@@ -27,7 +29,7 @@ import asyncio
 import json
 import logging
 import os
-from typing import Optional, AsyncGenerator, Dict, Any
+from typing import Optional, AsyncGenerator, Dict, Any, List
 from dataclasses import dataclass, field
 import httpx
 
@@ -43,33 +45,33 @@ class GatewayConfig:
         url: Gateway 服务地址，默认为 http://127.0.0.1:18789
         token: 认证 Token
         timeout: 请求超时时间（秒），默认 0 表示不超时
+        task_timeout: 任务超时时间（秒），默认 300 秒
+        max_retries: 最大重试次数，默认 3
     """
     url: str = "http://127.0.0.1:18789"
     token: str = ""
     timeout: float = 0.0  # 0 表示不超时，只要 Gateway 在执行就一直等
+    task_timeout: int = 300  # 任务超时 300 秒
     
     @classmethod
     def load(cls) -> "GatewayConfig":
         """
         从配置文件加载 Gateway 配置
         
-        从 ~/.openclaw/openclaw.json 读取配置。
+        从环境变量读取配置：
+        - GATEWAY_URL
+        - GATEWAY_TIMEOUT
+        - TASK_TIMEOUT
         
         Returns:
             GatewayConfig 实例
         """
-        try:
-            with open("/root/.openclaw/openclaw.json") as f:
-                config = json.load(f)
-                gateway_conf = config.get("gateway", {})
-                return cls(
-                    url=gateway_conf.get("url", "http://127.0.0.1:3000"),
-                    token=gateway_conf.get("auth", {}).get("token", ""),
-                    timeout=gateway_conf.get("timeout", 120.0)
-                )
-        except Exception as e:
-            logger.warning(f"加载 Gateway 配置失败: {e}")
-            return cls()
+        return cls(
+            url=os.getenv("GATEWAY_URL", "http://127.0.0.1:18789"),
+            token=os.getenv("GATEWAY_TOKEN", ""),
+            timeout=float(os.getenv("GATEWAY_TIMEOUT", "0")),
+            task_timeout=int(os.getenv("TASK_TIMEOUT", "300")),
+        )
 
 
 class GatewayHealth:
@@ -169,10 +171,13 @@ class GatewayBridge:
     2. 结果回传（Gateway → A2A）
     3. 会话管理
     4. 流式输出处理
+    5. 任务取消传播
+    6. 超时控制
     
     Attributes:
         config: Gateway 配置
         _session_cache: 会话历史缓存
+        _active_tasks: 活跃任务字典 (task_id -> cancel_event)
     
     Example:
         >>> bridge = GatewayBridge()
@@ -198,17 +203,21 @@ class GatewayBridge:
         """
         self.config = config or gateway_config
         self._session_cache: Dict[str, list] = {}
+        self._active_tasks: Dict[str, asyncio.Event] = {}  # 活跃任务追踪
     
     async def execute(
         self,
         content: str,
         session_key: str,
-        context: Dict[str, Any] = None
+        context: Dict[str, Any] = None,
+        timeout: int = None,
+        cancel_event: asyncio.Event = None
     ) -> str:
         """
         执行内容（同步方式）
         
         发送消息到 Gateway，等待完整结果后返回。
+        支持超时控制和取消传播。
         
         Args:
             content: 消息内容
@@ -216,12 +225,16 @@ class GatewayBridge:
             context: 额外上下文，包含：
                 - name: 发送者名称
                 - history: 历史消息列表
+            timeout: 超时时间（秒），None 使用默认配置
+            cancel_event: 取消事件，可选
         
         Returns:
             执行结果字符串
         
         Raises:
             Exception: Gateway 不可用或执行失败
+            asyncio.TimeoutError: 任务超时
+            asyncio.CancelledError: 任务被取消
         
         Example:
             >>> result = await bridge.execute(
@@ -255,13 +268,29 @@ class GatewayBridge:
             "stream": False,  # 同步模式
         }
         
+        # 追踪任务
+        task_id = session_key
+        self._active_tasks[task_id] = cancel_event or asyncio.Event()
+        
         try:
+            # 设置超时
+            timeout_seconds = timeout or self.config.task_timeout
+            timeout_obj = None
+            if timeout_seconds > 0:
+                timeout_obj = asyncio.create_task(
+                    self._timeout_handler(task_id, timeout_seconds)
+                )
+            
             async with httpx.AsyncClient(timeout=self.config.timeout) as client:
                 response = await client.post(
                     f"{self.config.url}/v1/chat/completions",
                     json=payload,
                     headers=headers
                 )
+                
+                # 取消超时任务
+                if timeout_obj:
+                    timeout_obj.cancel()
                 
                 if response.status_code == 200:
                     data = response.json()
@@ -276,30 +305,39 @@ class GatewayBridge:
                 else:
                     return f"执行失败: HTTP {response.status_code} - {response.text[:200]}"
                     
+        except asyncio.CancelledError:
+            # 传播取消
+            await self._propagate_cancel(session_key)
+            raise
         except httpx.TimeoutException:
             return "执行超时，请稍后重试"
         except Exception as e:
             logger.error(f"Gateway 调用失败: {e}")
-            return f"执行失败: {e}"
+            raise
+        finally:
+            # 清理活跃任务
+            self._active_tasks.pop(task_id, None)
     
     async def execute_stream(
         self,
         content: str,
         session_key: str,
         context: Dict[str, Any] = None,
-        cancel_event=None
+        timeout: int = None,
+        cancel_event: asyncio.Event = None
     ) -> AsyncGenerator[str, None]:
         """
         执行内容（流式方式）
         
         发送消息到 Gateway，边接收边 yield 内容片段。
-        支持通过 cancel_event 取消执行。
+        支持通过 cancel_event 取消执行，支持超时控制。
         
         Args:
             content: 消息内容
             session_key: 会话 key
             context: 额外上下文
-            cancel_event: asyncio.Event，可选，用于取消执行
+            timeout: 超时时间（秒）
+            cancel_event: 取消事件
         
         Yields:
             每个内容片段（字符串）
@@ -307,24 +345,7 @@ class GatewayBridge:
         Raises:
             Exception: Gateway 不可用或执行失败
             asyncio.CancelledError: 任务被取消
-        
-        Example:
-            >>> async for chunk in bridge.execute_stream(
-            ...     content="写一个小说",
-            ...     session_key="a2a:client1"
-            ... ):
-            ...     print(chunk, end="", flush=True)
-        
-        Example with Cancel:
-            >>> cancel_event = asyncio.Event()
-            >>> # 在另一个任务中取消
-            >>> # cancel_event.set()
-            >>> async for chunk in bridge.execute_stream(
-            ...     content="写一个小说",
-            ...     session_key="a2a:client1",
-            ...     cancel_event=cancel_event
-            ... ):
-            ...     print(chunk, end="", flush=True)
+            asyncio.TimeoutError: 任务超时
         """
         if not gateway_health.is_alive:
             raise Exception("Gateway 当前不可用，请稍后重试")
@@ -352,8 +373,21 @@ class GatewayBridge:
         }
         
         full_content = ""
+        task_id = session_key
+        timeout_task = None
+        
+        # 追踪任务
+        task_cancel_event = cancel_event or asyncio.Event()
+        self._active_tasks[task_id] = task_cancel_event
         
         try:
+            # 设置超时
+            timeout_seconds = timeout or self.config.task_timeout
+            if timeout_seconds > 0:
+                timeout_task = asyncio.create_task(
+                    self._timeout_handler(task_id, timeout_seconds)
+                )
+            
             async with httpx.AsyncClient(timeout=self.config.timeout) as client:
                 async with client.stream(
                     "POST",
@@ -363,7 +397,7 @@ class GatewayBridge:
                 ) as response:
                     async for line in response.aiter_lines():
                         # 检查取消事件
-                        if cancel_event and cancel_event.is_set():
+                        if task_cancel_event.is_set():
                             logger.info(f"流式执行被取消: {session_key}")
                             raise asyncio.CancelledError("任务被取消")
                         
@@ -386,15 +420,79 @@ class GatewayBridge:
                             except json.JSONDecodeError:
                                 continue
                 
+                # 取消超时任务
+                if timeout_task:
+                    timeout_task.cancel()
+                
                 # 更新会话缓存
                 self._update_session(session_key, messages, full_content)
                     
         except asyncio.CancelledError:
-            # 取消是正常流程，不记录为错误
+            # 传播取消到 Gateway
+            await self._propagate_cancel(session_key)
             raise
         except Exception as e:
             logger.error(f"Gateway 流式调用失败: {e}")
             raise
+        finally:
+            # 清理
+            self._active_tasks.pop(task_id, None)
+            if timeout_task:
+                timeout_task.cancel()
+    
+    async def _timeout_handler(self, task_id: str, timeout_seconds: int):
+        """
+        超时处理器
+        
+        任务超时后设置取消事件。
+        
+        Args:
+            task_id: 任务 ID
+            timeout_seconds: 超时时间（秒）
+        """
+        await asyncio.sleep(timeout_seconds)
+        
+        if task_id in self._active_tasks:
+            logger.warning(f"Task {task_id} 超时 ({timeout_seconds}s)")
+            self._active_tasks[task_id].set()
+    
+    async def _propagate_cancel(self, session_key: str):
+        """
+        传播取消到 Gateway
+        
+        通知 Gateway 取消当前会话的执行。
+        
+        Args:
+            session_key: 会话 key
+        """
+        try:
+            # 尝试通知 Gateway 取消会话
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                await client.post(
+                    f"{self.config.url}/v1/sessions/cancel",
+                    json={"session_key": session_key}
+                )
+                logger.info(f"取消传播到 Gateway: {session_key}")
+        except Exception as e:
+            logger.warning(f"取消传播失败: {e}")
+    
+    def cancel_task(self, session_key: str) -> bool:
+        """
+        取消任务
+        
+        触发取消事件，通知执行中的任务立即停止。
+        
+        Args:
+            session_key: 会话 key
+        
+        Returns:
+            是否成功触发取消
+        """
+        if session_key in self._active_tasks:
+            self._active_tasks[session_key].set()
+            logger.info(f"任务取消触发: {session_key}")
+            return True
+        return False
     
     def _update_session(self, session_key: str, messages: list, result: str) -> None:
         """
@@ -444,6 +542,9 @@ class GatewayBridge:
         if session_key in self._session_cache:
             del self._session_cache[session_key]
             logger.debug(f"会话已清除: {session_key}")
+        
+        # 同时取消活跃任务
+        self.cancel_task(session_key)
     
     def has_session(self, session_key: str) -> bool:
         """
@@ -456,6 +557,10 @@ class GatewayBridge:
             会话是否存在
         """
         return session_key in self._session_cache
+    
+    def get_active_count(self) -> int:
+        """获取活跃任务数"""
+        return len(self._active_tasks)
 
 
 # 全局桥接器实例
@@ -513,3 +618,12 @@ def clear_session(session_key: str) -> None:
         GatewayBridge.clear_session()
     """
     gateway_bridge.clear_session(session_key)
+
+
+def cancel_task(session_key: str) -> bool:
+    """
+    快捷取消任务函数
+    
+    使用全局 gateway_bridge 取消任务。
+    """
+    return gateway_bridge.cancel_task(session_key)

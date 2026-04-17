@@ -78,10 +78,10 @@ uv run python server/main.py
 
 ## 📸 图片资源
 
-| 文件 | 说明 |
-|------|------|
-| `imgs/group.png` | 交流群二维码 |
-| `imgs/sponsor.png` | 赞助二维码 |
+| 交流群 | 赞助 |
+|:---:|:---:|
+| ![交流群](./imgs/group.png) | ![赞助](./imgs/sponsor.png) |
+| 欢迎进群沟通 | 给作者续一杯 1M的Token |
 
 ---
 

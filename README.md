@@ -1,6 +1,6 @@
 # Open-Claw-Auxiliary-Libs
 
-OpenClaw 辅助库和插件集合。
+OpenClaw 自产的辅助库集合。
 
 ---
 
@@ -81,7 +81,7 @@ uv run python server/main.py
 | 交流群 | 赞助 |
 |:---:|:---:|
 | ![交流群](./imgs/group.png) | ![赞助](./imgs/sponsor.png) |
-| 欢迎进群沟通 | 给作者续一杯 1M的Token |
+| 欢迎进群沟通，相互学习 | 觉得有用给作者续一杯 1M的Token🦞 |
 
 ---
 

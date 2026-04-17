@@ -26,9 +26,17 @@ from session import Session, session_store
 from session_store import session_store as gateway_session_store, init_session_store, get_session_store  # ULID 会话队列
 from sse import SSEClient, SSEStream, broadcaster
 from websocket import ws_server, WSClient
-from gateway import gateway_bridge, gateway_config, gateway_health
-from gateway_pool import get_gateway_pool, start_gateway_pool, GatewayPool
 from db import init_database, get_database, A2ADatabase
+
+# Gateway 后端选择（支持 OpenClaw 和 Hermes）
+from gateway_selector import GATEWAY_TYPE, get_gateway_bridge, gateway_bridge, gateway_config, gateway_health
+
+if GATEWAY_TYPE.value == "hermes":
+    from gateway_pool import get_gateway_pool, start_gateway_pool, GatewayPool
+    logger.info(f"使用 Hermes Gateway 后端")
+else:
+    from gateway_pool import get_gateway_pool, start_gateway_pool, GatewayPool
+    logger.info(f"使用 OpenClaw Gateway 后端")
 
 # 配置日志
 logging.basicConfig(
@@ -454,6 +462,48 @@ def register_jsonrpc_methods():
             "is_first": is_first
         }
     
+    def is_self_intro_request(content: str) -> bool:
+        """检查是否是自我介绍请求"""
+        keywords = [
+            "介绍", "自我介绍", "你是谁", "你是啥",
+            "introduce", "who are you", "what are you",
+            "介绍自己", "自我介绍一下", "说说你自己",
+            "什么身份", "什么角色", "什么Agent"
+        ]
+        content_lower = content.lower()
+        return any(kw in content_lower for kw in keywords)
+
+    def get_self_intro() -> str:
+        """获取自我介绍内容"""
+        return """
+🤖 **作家 (Writer) - AI 写作助手**
+
+**基本信息**
+- **角色**：首席写作专家，兼职首席技术官
+- **上级**：钱多多 (GM Agent)
+- **语言**：中文为主，专业场景中英混用
+
+**核心能力**
+- 📝 小说创作（番茄小说、网文写作）
+- ✍️ 内容编辑（润色、改写、校对）
+- 🎯 任务委派（A2A 协议）
+- 💻 技术开发（Python、JavaScript）
+- 📊 自媒体运营
+
+**协作方式**
+- 支持 A2A 协议（端口 13666）
+- 可接收任务委派并返回结果
+- 支持流式输出（SSE）
+
+**当前状态**
+- 🟢 运行中
+- 📡 端口：13666
+- 🔗 连接方式：WebSocket / SSE / HTTP JSON-RPC
+
+---
+如需帮助，请发送具体任务！
+"""
+
     async def execute_task(task: Task, ulid: str, streaming: bool = True):
         """
         执行任务
@@ -463,6 +513,7 @@ def register_jsonrpc_methods():
         - 任务超时自动取消（默认 5 分钟）
         - 定期心跳推送
         - 任务取消
+        - 自我介绍（直接响应）
         
         Args:
             task: 任务对象
@@ -475,6 +526,27 @@ def register_jsonrpc_methods():
             "history": [m.to_dict() for m in task.messages[:-1]] if task.messages else []
         }
         
+        # 获取任务内容
+        content = task.messages[-1].content if task.messages else ""
+        
+        # 检查是否是自我介绍请求
+        if is_self_intro_request(content):
+            intro = get_self_intro()
+            task.add_artifact(Artifact(type="text", content=intro))
+            task.transition(TaskState.COMPLETED, "自我介绍完成")
+            await broadcaster.send_to(task.session_id or task.id, "task/completed", {
+                "taskId": task.id,
+                "status": task.status.to_dict(),
+                "artifacts": [a.to_dict() for a in task.artifacts]
+            })
+            
+            # 通知队列处理下一个任务
+            try:
+                next_task = await gateway_session_store.complete_current_task(ulid, result=intro)
+            except Exception as e:
+                logger.error(f"队列处理异常: {e}")
+            return
+        
         try:
             if streaming:
                 # 流式执行
@@ -483,7 +555,7 @@ def register_jsonrpc_methods():
                 heartbeat_interval = 30  # 每 30 秒发一次心跳
                 
                 async for chunk in gateway_bridge.execute_stream(
-                    task.messages[-1].content if task.messages else "",
+                    content,
                     session_key,
                     context,
                     cancel_event=task.cancel_event
@@ -561,7 +633,6 @@ def register_jsonrpc_methods():
                     logger.info(f"队列为空或 a2a_task_id 为空")
             else:
                 # 同步执行
-                content = task.messages[-1].content if task.messages else ""
                 result = await gateway_bridge.execute(content, session_key, context)
                 
                 task.add_artifact(Artifact(type="text", content=result))

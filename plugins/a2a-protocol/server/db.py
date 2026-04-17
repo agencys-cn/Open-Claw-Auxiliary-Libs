@@ -106,7 +106,11 @@ class A2ADatabase:
             cleanup_interval: 自动清理间隔（秒）
         """
         if db_path is None:
-            db_path = os.path.expanduser("~/.openclaw/a2a_cache.db")
+            # 默认放项目目录下，方便随项目迁移
+            db_path = os.path.join(
+                os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                "a2a_cache.db"
+            )
         
         self.db_path = db_path
         self.session_ttl = session_ttl

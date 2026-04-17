@@ -4,7 +4,11 @@ A2A 协议核心组件 - 桥接 OpenClaw Gateway
 
 概述:
     负责 A2A Server 与 OpenClaw Gateway 之间的通信。
-    处理消息转发、会话管理、流式输出等。
+    
+    注意：现在推荐使用 gateway_pool.py 中的 GatewayPool 类，
+    它提供自动重连和任务队列功能。
+    
+    GatewayBridge 保留用于简单场景或向后兼容。
 
 功能:
     1. 消息转发 - A2A 请求 → Gateway → 返回结果
@@ -23,6 +27,15 @@ A2A 协议核心组件 - 桥接 OpenClaw Gateway
     >>> # 流式执行
     >>> async for chunk in bridge.execute_stream("写一个小说", "a2a:client1"):
     ...     print(chunk, end="", flush=True)
+    
+    
+    推荐使用（带自动重连）：
+    >>> from gateway_pool import get_gateway_pool
+    >>> pool = get_gateway_pool()
+    >>> await pool.start()
+    >>> 
+    >>> # 执行任务，Gateway 重启后自动重连
+    >>> result = await pool.execute("写一个小说", session_key)
 """
 
 import asyncio

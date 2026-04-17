@@ -27,6 +27,7 @@ from session_store import session_store as gateway_session_store, init_session_s
 from sse import SSEClient, SSEStream, broadcaster
 from websocket import ws_server, WSClient
 from gateway import gateway_bridge, gateway_config, gateway_health
+from gateway_pool import get_gateway_pool, start_gateway_pool, GatewayPool
 from db import init_database, get_database, A2ADatabase
 
 # 配置日志
@@ -61,6 +62,10 @@ async def lifespan(app: FastAPI):
     init_registry(db)
     logger.info("Agent Card 注册表已初始化")
     
+    # 启动 Gateway 连接池（自动重连）
+    gateway_pool = await start_gateway_pool()
+    logger.info(f"Gateway 连接池已启动: {gateway_pool.urls}")
+    
     # 注册 JSON-RPC 方法
     register_jsonrpc_methods()
     register_default_agent()
@@ -69,6 +74,8 @@ async def lifespan(app: FastAPI):
     
     # 关闭时保存会话
     await session_store_instance.shutdown()
+    await gateway_pool.stop()
+    logger.info("Gateway 连接池已关闭")
     logger.info("会话存储已关闭")
     logger.info("A2A Server 关闭")
 
@@ -334,6 +341,16 @@ async def get_db_stats():
         "total_tasks": len(task_store),
         "registered_agents": len(registry.list_all()),
     }
+
+
+# ─────────────────────────────────────────────
+# 路由：Gateway 状态
+# ─────────────────────────────────────────────
+@app.get("/gateway/pool")
+async def get_gateway_pool_status():
+    """获取 Gateway 连接池状态"""
+    pool = get_gateway_pool()
+    return pool.get_stats()
 
 
 # ─────────────────────────────────────────────

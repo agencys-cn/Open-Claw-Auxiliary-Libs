@@ -53,7 +53,7 @@ ULID_ENABLED=true
 
 ## 赞助
 
-如果你觉得有用，给作者续一杯 ☕
+如果你觉得有用，给作者续一杯 1M的Token
 
 ![赞助](./core/sponsor.png)
 
